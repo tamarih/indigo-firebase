@@ -3,8 +3,6 @@
   SESSION_KEY,
   DEFAULT_LOGO_URL,
   INSURANCE_RENEWAL_URL,
-  SITE_CONTENT_VERSION,
-  DEFAULT_ADMIN,
   ROLES,
   RANKS,
   NITROX_LEVELS,
@@ -12,10 +10,8 @@
   PAYMENT_STATUS,
   APPROVAL_STATUS,
   EQUIPMENT_ITEMS,
-  DEFAULT_REGISTRATION_FIELDS,
-  INITIAL_SITES
+  DEFAULT_REGISTRATION_FIELDS
 } from "./js/constants.js";
-import { SITE_CONTENT } from "./js/site-content.js";
 import {
   id,
   today,
@@ -30,6 +26,30 @@ import {
   readFileAsStoredUrl,
   phoneToWhatsApp
 } from "./js/utils.js";
+import {
+  state,
+  loadDb,
+  saveDb,
+  normalizeDb,
+  normalizeRegistrationFields,
+  currentUser,
+  canManage,
+  isAdmin,
+  getProfile,
+  textValue,
+  siteById,
+  eventById,
+  approvedCount,
+  seatCount,
+  eventOpenForSite,
+  nextFutureEventForSite,
+  homeSites,
+  futureDiveEvents,
+  isEventFull,
+  eventRegistrationState,
+  eventParticipants,
+  eventWaitlist
+} from "./js/state.js";
 
 const app = document.querySelector("#app");
 const nav = document.querySelector("#mainNav");
@@ -37,96 +57,7 @@ const userMenu = document.querySelector("#userMenu");
 const toast = document.querySelector("#toast");
 const brandLogo = document.querySelector("#brandLogo");
 
-let db = loadDb();
-let currentUserId = sessionStorage.getItem(SESSION_KEY) || "guest";
-let cloudEnabled = false;
-let currentAdminTab = "registrations";
-let editingSiteId = null;
-let editingUserId = null;
-let editingEventId = null;
-let editingRegistrationId = null;
-let registrationState = null;
-let loginState = null;
-let textDrafts = {};
-let fieldDrafts = {};
 
-function loadDb() {
-  const saved = localStorage.getItem(DB_KEY);
-  if (saved) {
-    return normalizeDb(JSON.parse(saved));
-  }
-  const seeded = seedDb();
-  localStorage.setItem(DB_KEY, JSON.stringify(seeded));
-  return seeded;
-}
-
-function normalizeDb(nextDb) {
-  nextDb.Users ??= [];
-  nextDb.RegistrationFields = normalizeRegistrationFields(nextDb.RegistrationFields || []);
-  nextDb.BrandSettings ??= {
-    logo_data_url: "",
-    logo_alt: "INDIGO מועדון צלילה",
-    updated_date: nowIso()
-  };
-  nextDb.DiveSites = (nextDb.DiveSites || []).map((site, index) => ({
-    image_url: "",
-    show_price_only_in_details: true,
-    order_index: index + 1,
-    ...site
-  }));
-  if (nextDb.Meta?.site_content_version !== SITE_CONTENT_VERSION) {
-    applySiteContent(nextDb);
-    nextDb.Meta = {
-      ...(nextDb.Meta || {}),
-      site_content_version: SITE_CONTENT_VERSION
-    };
-  }
-  const registrationIntro = nextDb.DynamicTexts?.find((text) => text.screen_name === "registration" && text.text_key === "intro");
-  if (registrationIntro?.text_value?.includes("ארבעה שלבים")) {
-    registrationIntro.text_value = "מלאו את הפרטים בשני שלבים קצרים. המועדון יאשר את ההרשמה לאחר בדיקת הפרטים והתשלום.";
-  }
-  ensureDefaultAdmin(nextDb);
-  return nextDb;
-}
-
-function normalizeRegistrationFields(fields) {
-  const existing = new Map(fields.map((field) => [field.field_key, field]));
-  return DEFAULT_REGISTRATION_FIELDS.map((field) => ({
-    ...field,
-    ...(existing.get(field.field_key) || {})
-  })).sort((a, b) => a.order_index - b.order_index);
-}
-
-function ensureDefaultAdmin(targetDb) {
-  const adminByEmail = targetDb.Users.find((user) => user.email?.toLowerCase() === DEFAULT_ADMIN.email);
-  if (adminByEmail) {
-    Object.assign(adminByEmail, {
-      first_name: DEFAULT_ADMIN.first_name,
-      last_name: DEFAULT_ADMIN.last_name,
-      phone: DEFAULT_ADMIN.phone,
-      role: "admin",
-      is_club_member: true,
-      club_member_notes: adminByEmail.club_member_notes || DEFAULT_ADMIN.club_member_notes
-    });
-    return;
-  }
-  targetDb.Users.push({
-    ...DEFAULT_ADMIN,
-    created_date: nowIso()
-  });
-}
-
-function applySiteContent(targetDb) {
-  targetDb.DiveSites = (targetDb.DiveSites || []).map((site) => ({
-    ...site,
-    ...(SITE_CONTENT[site.name] || {})
-  }));
-}
-
-function saveDb() {
-  localStorage.setItem(DB_KEY, JSON.stringify(db));
-  window.IndigoCloud?.save(db);
-}
 
 function renderLoading() {
   renderBrandLogo();
@@ -145,280 +76,31 @@ async function bootstrapApp() {
   renderLoading();
 
   try {
-    const cloudResult = await window.IndigoCloud?.load(db);
+    const cloudResult = await window.IndigoCloud?.load(state.db);
     if (cloudResult?.db) {
-      db = normalizeDb(cloudResult.db);
-      localStorage.setItem(DB_KEY, JSON.stringify(db));
+      state.db = normalizeDb(cloudResult.db);
+      localStorage.setItem(DB_KEY, JSON.stringify(state.db));
     }
-    cloudEnabled = Boolean(cloudResult?.enabled);
+    state.cloudEnabled = Boolean(cloudResult?.enabled);
   } catch (error) {
     console.error("Cloud bootstrap failed", error);
-    cloudEnabled = false;
+    state.cloudEnabled = false;
   }
 
-  if (currentUserId !== "guest" && !db.Users.some((user) => user.id === currentUserId)) {
-    currentUserId = "guest";
-    sessionStorage.setItem(SESSION_KEY, currentUserId);
+  if (state.currentUserId !== "guest" && !state.db.Users.some((user) => user.id === state.currentUserId)) {
+    state.currentUserId = "guest";
+    sessionStorage.setItem(SESSION_KEY, state.currentUserId);
   }
 
   runSelfCheck();
   render();
 
-  if (cloudEnabled) {
+  if (state.cloudEnabled) {
     showToast("האפליקציה מחוברת ל-Firebase ושומרת בענן.");
   }
 }
 
-function seedDb() {
-  const users = [
-    {
-      id: "user_regular",
-      first_name: "תמר",
-      last_name: "כהן",
-      email: "tamar@example.com",
-      phone: "050-1234567",
-      id_number: "123456789",
-      birth_date: "1992-04-12",
-      role: "user",
-      is_club_member: false,
-      club_member_notes: "",
-      saved_diver_profile: true,
-      created_date: nowIso()
-    },
-    {
-      id: "user_manager",
-      first_name: "דנה",
-      last_name: "מנהלת",
-      email: "manager@indigo.local",
-      phone: "052-7777777",
-      id_number: "987654321",
-      birth_date: "1988-08-22",
-      role: "club_manager",
-      is_club_member: true,
-      club_member_notes: "מנהלת פעילה",
-      saved_diver_profile: true,
-      created_date: nowIso()
-    },
-    {
-      id: "user_admin",
-      first_name: "אדמין",
-      last_name: "אינדיגו",
-      email: "admin@indigo.local",
-      phone: "053-9999999",
-      id_number: "111222333",
-      birth_date: "1985-01-01",
-      role: "admin",
-      is_club_member: true,
-      club_member_notes: "גישה מלאה",
-      saved_diver_profile: true,
-      created_date: nowIso()
-    },
-    {
-      id: "user_member",
-      first_name: "נועה",
-      last_name: "חברת מועדון",
-      email: "noa@example.com",
-      phone: "054-2222222",
-      id_number: "222333444",
-      birth_date: "1995-06-16",
-      role: "user",
-      is_club_member: true,
-      club_member_notes: "חברה עד סוף השנה",
-      saved_diver_profile: true,
-      created_date: nowIso()
-    }
-  ];
 
-  const profiles = users.map((user, index) => ({
-    id: id("profile"),
-    user_id: user.id,
-    first_name: user.first_name,
-    last_name: user.last_name,
-    phone: user.phone,
-    email: user.email,
-    id_number: user.id_number,
-    birth_date: user.birth_date,
-    diving_rank: index === 0 ? "OWD / כוכב 1" : "AOWD / כוכב 2",
-    nitrox_certified: index > 0,
-    nitrox_level: index > 0 ? "1" : "none",
-    insurance_valid_until: index === 0 ? today(-4) : today(120),
-    last_dive_date: index === 0 ? today(-220) : today(-40),
-    certification_file_url: "קובץ שמור: תעודת צלילה.pdf",
-    insurance_file_url: index === 0 ? "" : "קובץ שמור: ביטוח.pdf",
-    save_details_for_next_time: true,
-    updated_date: nowIso()
-  }));
-
-  const sites = INITIAL_SITES.map((name, index) => ({
-    id: `site_${index + 1}`,
-    name,
-    short_description: "אתר צלילה צפוני עם נוף תת ימי עשיר, מתאים לתכנון יציאה מסודרת עם המועדון.",
-    full_description: `${name} הוא אתר אהוב של אינדיגו, עם תוואי צלילה מגוון, תנאי ים משתנים ונקודות עניין לצוללים מוסמכים.`,
-    depth: index < 3 ? "8-18 מטר" : "18-32 מטר",
-    difficulty_level: index < 3 ? "קל-בינוני" : "בינוני-מתקדם",
-    suitable_for_ranks: index < 3 ? "OWD ומעלה" : "AOWD ומעלה",
-    image_url: "",
-    is_active: true,
-    show_on_homepage: true,
-    order_index: index + 1,
-    price: index < 3 ? 220 : 280,
-    show_price_only_in_details: true,
-    allow_registration: true
-  }));
-
-  const events = sites.slice(0, 7).map((site, index) => ({
-    id: `event_${index + 1}`,
-    site_id: site.id,
-    dive_date: today(7 + index * 3),
-    dive_time: index % 2 ? "13:00" : "09:00",
-    meeting_time: index % 2 ? "12:15" : "08:15",
-    max_participants: index === 0 ? 1 : 10,
-    price: site.price,
-    status: "open",
-    notes: "להגיע עם תעודות וביטוח בתוקף.",
-    registration_notes: "כל הרשמה נבדקת ומאושרת על ידי המועדון.",
-    requires_club_approval: true,
-    created_by: "user_manager"
-  }));
-
-  const seeded = {
-    Users: users,
-    DiverProfiles: profiles,
-    DiveSites: sites,
-    DiveEvents: events,
-    DiveRegistrations: [],
-    PaymentsSettings: {
-      bit_link: "https://bit.example/indigo",
-      paybox_link: "https://paybox.example/indigo",
-      phone_payment_number: "04-9000000",
-      payment_text: "ההרשמה אינה מאושרת סופית עד לאישור המועדון וקבלת תשלום. מומלץ לשלם מראש בביט או בפייבוקס.",
-      cancellation_terms_text: "אני מאשר/ת כי דמי ההרשמה לא יוחזרו אם לא עודכן ביטול לפחות 24 שעות מראש.",
-      updated_date: nowIso()
-    },
-    DynamicFormFields: [
-      { id: id("field"), form_name: "registration", field_key: "buddy_name", label: "בן/בת זוג לצלילה", type: "text", required: false, options: "", is_active: true, order_index: 1, help_text: "אופציונלי" },
-      { id: id("field"), form_name: "registration", field_key: "user_notes", label: "הערות לצוות", type: "textarea", required: false, options: "", is_active: true, order_index: 2, help_text: "" }
-    ],
-    RegistrationFields: normalizeRegistrationFields([]),
-    DynamicTexts: [
-      { id: id("text"), screen_name: "success", text_key: "summary", text_value: "ההרשמה התקבלה ונמצאת בהמתנה לאישור המועדון.", is_active: true },
-      { id: id("text"), screen_name: "registration", text_key: "intro", text_value: "מלאו את הפרטים בשני שלבים קצרים. המועדון יאשר את ההרשמה לאחר בדיקת הפרטים והתשלום.", is_active: true }
-    ],
-    BrandSettings: {
-      logo_data_url: "",
-      logo_alt: "INDIGO מועדון צלילה",
-      updated_date: nowIso()
-    },
-    Meta: {
-      site_content_version: SITE_CONTENT_VERSION
-    }
-  };
-  applySiteContent(seeded);
-
-  return seeded;
-}
-
-function currentUser() {
-  return db.Users.find((user) => user.id === currentUserId) || {
-    id: "guest",
-    first_name: "אורח/ת",
-    last_name: "",
-    email: "",
-    phone: "",
-    id_number: "",
-    birth_date: "",
-    role: "user",
-    is_club_member: false,
-    club_member_notes: "",
-    saved_diver_profile: false,
-    created_date: ""
-  };
-}
-
-function canManage(user = currentUser()) {
-  return user.role === "admin" || user.role === "club_manager";
-}
-
-function isAdmin(user = currentUser()) {
-  return user.role === "admin";
-}
-
-function getProfile(userId = currentUserId) {
-  return db.DiverProfiles.find((profile) => profile.user_id === userId);
-}
-
-function textValue(screen, key, fallback) {
-  return db.DynamicTexts.find((text) => text.screen_name === screen && text.text_key === key && text.is_active)?.text_value || fallback;
-}
-
-function siteById(siteId) {
-  return db.DiveSites.find((site) => site.id === siteId);
-}
-
-function eventById(eventId) {
-  return db.DiveEvents.find((event) => event.id === eventId);
-}
-
-function approvedCount(eventId) {
-  return db.DiveRegistrations.filter((reg) => reg.event_id === eventId && reg.club_approval_status === "approved").length;
-}
-
-function seatCount(eventId) {
-  return db.DiveRegistrations.filter((reg) => reg.event_id === eventId && ["pending", "approved"].includes(reg.club_approval_status)).length;
-}
-
-function eventOpenForSite(siteId) {
-  return db.DiveEvents
-    .filter((event) => event.site_id === siteId && event.status === "open" && event.dive_date >= today())
-    .sort((a, b) => `${a.dive_date} ${a.dive_time}`.localeCompare(`${b.dive_date} ${b.dive_time}`))[0];
-}
-
-function nextFutureEventForSite(siteId) {
-  return db.DiveEvents
-    .filter((event) => event.site_id === siteId && event.status !== "cancelled" && event.dive_date >= today())
-    .sort((a, b) => `${a.dive_date} ${a.dive_time || ""}`.localeCompare(`${b.dive_date} ${b.dive_time || ""}`))[0];
-}
-
-function homeSites() {
-  return db.DiveSites
-    .filter((site) => site.is_active && site.show_on_homepage)
-    .sort((a, b) => {
-      const eventA = nextFutureEventForSite(a.id);
-      const eventB = nextFutureEventForSite(b.id);
-      if (eventA && eventB) return `${eventA.dive_date} ${eventA.dive_time || ""}`.localeCompare(`${eventB.dive_date} ${eventB.dive_time || ""}`);
-      if (eventA) return -1;
-      if (eventB) return 1;
-      return a.order_index - b.order_index;
-    });
-}
-
-function futureDiveEvents() {
-  return db.DiveEvents
-    .filter((event) => event.dive_date >= today() && event.status !== "cancelled")
-    .sort((a, b) => `${a.dive_date} ${a.dive_time || ""}`.localeCompare(`${b.dive_date} ${b.dive_time || ""}`));
-}
-
-function isEventFull(event) {
-  return seatCount(event.id) >= Number(event.max_participants || 0);
-}
-
-function eventRegistrationState(event) {
-  if (!event || event.status === "closed" || event.status === "cancelled") return "closed";
-  if (event.status === "full" || isEventFull(event)) return "full";
-  return "open";
-}
-
-function eventParticipants(eventId) {
-  return db.DiveRegistrations
-    .filter((reg) => reg.event_id === eventId && ["pending", "approved"].includes(reg.club_approval_status))
-    .sort((a, b) => String(a.created_date || "").localeCompare(String(b.created_date || "")));
-}
-
-function eventWaitlist(eventId) {
-  return db.DiveRegistrations
-    .filter((reg) => reg.event_id === eventId && reg.club_approval_status === "waiting_list")
-    .sort((a, b) => String(a.waitlist_created_date || a.created_date || "").localeCompare(String(b.waitlist_created_date || b.created_date || "")));
-}
 
 function showToast(message, type = "ok") {
   toast.textContent = message;
@@ -450,9 +132,9 @@ function showInsuranceRenewalPopup() {
 }
 
 function maybeShowInsuranceRenewalPopup() {
-  if (!registrationState || !isInsuranceExpired(registrationState.form.insurance_valid_until)) return;
-  if (registrationState.insurancePopupShownFor === registrationState.form.insurance_valid_until) return;
-  registrationState.insurancePopupShownFor = registrationState.form.insurance_valid_until;
+  if (!state.registrationState || !isInsuranceExpired(state.registrationState.form.insurance_valid_until)) return;
+  if (state.registrationState.insurancePopupShownFor === state.registrationState.form.insurance_valid_until) return;
+  state.registrationState.insurancePopupShownFor = state.registrationState.form.insurance_valid_until;
   showInsuranceRenewalPopup();
 }
 
@@ -485,9 +167,9 @@ function render() {
 }
 
 function logout() {
-  currentUserId = "guest";
-  loginState = null;
-  registrationState = null;
+  state.currentUserId = "guest";
+  state.loginState = null;
+  state.registrationState = null;
   sessionStorage.removeItem(SESSION_KEY);
   showToast("התנתקת מהמערכת.");
   navigate("home");
@@ -502,7 +184,7 @@ function renderUserMenuV2() {
       <span>
         <strong>${connected ? `${escapeHtml(user.first_name)} ${escapeHtml(user.last_name)}` : "משתמש לא מחובר"}</strong>
         <small>${connected ? escapeHtml(ROLES[user.role] || "משתמש רגיל") : "אפשר להירשם לצלילה גם בלי חשבון"}</small>
-        <small class="${cloudEnabled ? "cloud-ok" : "cloud-off"}">${cloudEnabled ? "ענן מחובר" : "שמירה מקומית בלבד"}</small>
+        <small class="${state.cloudEnabled ? "cloud-ok" : "cloud-off"}">${state.cloudEnabled ? "ענן מחובר" : "שמירה מקומית בלבד"}</small>
       </span>
     </div>
   `;
@@ -531,8 +213,8 @@ function renderNavV2() {
 }
 
 function renderBrandLogo() {
-  const logoUrl = db.BrandSettings?.logo_data_url || DEFAULT_LOGO_URL;
-  brandLogo.innerHTML = `<img class="brand-logo-img" src="${logoUrl}" alt="${escapeHtml(db.BrandSettings?.logo_alt || "INDIGO מועדון צלילה")}" />`;
+  const logoUrl = state.db.BrandSettings?.logo_data_url || DEFAULT_LOGO_URL;
+  brandLogo.innerHTML = `<img class="brand-logo-img" src="${logoUrl}" alt="${escapeHtml(state.db.BrandSettings?.logo_alt || "INDIGO מועדון צלילה")}" />`;
 }
 
 function renderUserMenu() {
@@ -542,7 +224,7 @@ function renderUserMenu() {
       <span>
         <strong>${escapeHtml(user.first_name)} ${escapeHtml(user.last_name)}</strong>
         <small>${user.id === "guest" ? "לא מחובר/ת" : escapeHtml(ROLES[user.role])}</small>
-        <small class="${cloudEnabled ? "cloud-ok" : "cloud-off"}">${cloudEnabled ? "ענן מחובר" : "שמירה מקומית בלבד"}</small>
+        <small class="${state.cloudEnabled ? "cloud-ok" : "cloud-off"}">${state.cloudEnabled ? "ענן מחובר" : "שמירה מקומית בלבד"}</small>
       </span>
       <button class="btn ghost compact" type="button" data-action="open-login">כניסה / החלפה</button>
     </div>
@@ -674,7 +356,7 @@ function renderInsuranceCard() {
 }
 
 function renderSites() {
-  const sites = db.DiveSites.filter((site) => site.is_active).sort((a, b) => a.order_index - b.order_index);
+  const sites = state.db.DiveSites.filter((site) => site.is_active).sort((a, b) => a.order_index - b.order_index);
   app.innerHTML = `
     <section class="section">
       <div class="section-header">
@@ -728,7 +410,7 @@ function renderSiteCard(site) {
 function renderSiteDetails(siteId) {
   const site = siteById(siteId);
   if (!site) return renderNotFound();
-  const events = db.DiveEvents.filter((event) => event.site_id === site.id && event.dive_date >= today()).sort((a, b) => a.dive_date.localeCompare(b.dive_date));
+  const events = state.db.DiveEvents.filter((event) => event.site_id === site.id && event.dive_date >= today()).sort((a, b) => a.dive_date.localeCompare(b.dive_date));
   const siteHero = site.image_url ? `<div class="site-detail-image" style="background-image: linear-gradient(180deg, rgba(5, 70, 83, 0.05), rgba(5, 70, 83, 0.34)), url('${escapeHtml(site.image_url)}')"></div>` : "";
   app.innerHTML = `
     <section class="section">
@@ -823,13 +505,13 @@ function renderWaitlist(eventId) {
     const registration = {
       id: id("reg"),
       event_id: event.id,
-      user_id: currentUserId !== "guest" ? currentUserId : "",
+      user_id: state.currentUserId !== "guest" ? state.currentUserId : "",
       first_name: String(data.first_name || "").trim(),
       last_name: String(data.last_name || "").trim(),
       phone: String(data.phone || "").trim(),
-      email: currentUserId !== "guest" ? currentUser().email || "" : "",
-      id_number: currentUserId !== "guest" ? currentUser().id_number || "" : "",
-      birth_date: currentUserId !== "guest" ? currentUser().birth_date || "" : "",
+      email: state.currentUserId !== "guest" ? currentUser().email || "" : "",
+      id_number: state.currentUserId !== "guest" ? currentUser().id_number || "" : "",
+      birth_date: state.currentUserId !== "guest" ? currentUser().birth_date || "" : "",
       diving_rank: data.diving_rank,
       nitrox_certified: false,
       nitrox_level: "none",
@@ -861,7 +543,7 @@ function renderWaitlist(eventId) {
       return;
     }
 
-    db.DiveRegistrations.push(registration);
+    state.db.DiveRegistrations.push(registration);
     saveDb();
     app.innerHTML = `
       <section class="success-screen">
@@ -897,7 +579,7 @@ function renderRegistration(eventId) {
   const profile = getProfile();
   const user = currentUser();
 
-  registrationState = registrationState?.event_id === eventId ? registrationState : {
+  state.registrationState = state.registrationState?.event_id === eventId ? state.registrationState : {
     event_id: eventId,
     step: 1,
     loading: false,
@@ -932,7 +614,7 @@ function renderRegistration(eventId) {
     }
   };
 
-  const f = registrationState.form;
+  const f = state.registrationState.form;
   app.innerHTML = `
     <section class="section">
       <div class="section-header">
@@ -945,26 +627,26 @@ function renderRegistration(eventId) {
       </div>
       <div class="registration-layout">
         <aside class="panel stepper">
-          ${[["1", "פרטים אישיים, צלילה וביטוח"], ["2", "תשלום, חתימה ושליחה"]].map(([step, label]) => `<button class="btn ${registrationState.step === Number(step) ? "active" : ""}" data-step="${step}" type="button">${step}. ${label}</button>`).join("")}
+          ${[["1", "פרטים אישיים, צלילה וביטוח"], ["2", "תשלום, חתימה ושליחה"]].map(([step, label]) => `<button class="btn ${state.registrationState.step === Number(step) ? "active" : ""}" data-step="${step}" type="button">${step}. ${label}</button>`).join("")}
         </aside>
         <form id="registrationForm" class="panel" novalidate>
           <div id="registrationStep">${renderRegistrationStep(f, event)}</div>
-          <div id="registrationWarnings" class="warning-list">${renderWarnings(registrationState.warnings)}</div>
+          <div id="registrationWarnings" class="warning-list">${renderWarnings(state.registrationState.warnings)}</div>
           <div class="form-actions">
-            ${registrationState.step > 1 ? `<button class="btn ghost" type="button" data-action="prev-step">הקודם</button>` : ""}
-            ${registrationState.step < 2 ? `<button class="btn primary" type="button" data-action="next-step">הבא</button>` : `<button class="btn primary" type="submit" ${registrationState.loading ? "disabled" : ""}>${registrationState.loading ? "שולח..." : "שליחת הרשמה"}</button>`}
+            ${state.registrationState.step > 1 ? `<button class="btn ghost" type="button" data-action="prev-step">הקודם</button>` : ""}
+            ${state.registrationState.step < 2 ? `<button class="btn primary" type="button" data-action="next-step">הבא</button>` : `<button class="btn primary" type="submit" ${state.registrationState.loading ? "disabled" : ""}>${state.registrationState.loading ? "שולח..." : "שליחת הרשמה"}</button>`}
           </div>
         </form>
       </div>
     </section>
   `;
   bindRegistrationEvents();
-  if (registrationState.step === 2) setupSignaturePad();
+  if (state.registrationState.step === 2) setupSignaturePad();
 }
 
 function renderRegistrationStep(f, event) {
-  const dynamicFields = db.DynamicFormFields.filter((field) => field.form_name === "registration" && field.is_active).sort((a, b) => a.order_index - b.order_index);
-  if (registrationState.step === 1) {
+  const dynamicFields = state.db.DynamicFormFields.filter((field) => field.form_name === "registration" && field.is_active).sort((a, b) => a.order_index - b.order_index);
+  if (state.registrationState.step === 1) {
     return `
       <h3>פרטים אישיים</h3>
       <div class="form-grid">
@@ -978,19 +660,19 @@ function renderRegistrationStep(f, event) {
       <div class="form-grid">${dynamicFields.map((field) => dynamicField(field, f[field.field_key] || "")).join("")}</div>
     `;
   }
-  if (registrationState.step === 2) {
+  if (state.registrationState.step === 2) {
     const user = currentUser();
     return `
       <h3>תשלום ותנאים</h3>
-      <p>${escapeHtml(db.PaymentsSettings.payment_text)}</p>
+      <p>${escapeHtml(state.db.PaymentsSettings.payment_text)}</p>
       ${renderPaymentSummary(f, event)}
       <div class="radio-stack">
-        ${paymentOption("bit", `${PAYMENT_METHODS.bit} (${db.PaymentsSettings.bit_link})`, f.payment_method)}
-        ${paymentOption("paybox", `${PAYMENT_METHODS.paybox} (${db.PaymentsSettings.paybox_link})`, f.payment_method)}
-        ${paymentOption("phone", `${PAYMENT_METHODS.phone} - ${db.PaymentsSettings.phone_payment_number}`, f.payment_method)}
+        ${paymentOption("bit", `${PAYMENT_METHODS.bit} (${state.db.PaymentsSettings.bit_link})`, f.payment_method)}
+        ${paymentOption("paybox", `${PAYMENT_METHODS.paybox} (${state.db.PaymentsSettings.paybox_link})`, f.payment_method)}
+        ${paymentOption("phone", `${PAYMENT_METHODS.phone} - ${state.db.PaymentsSettings.phone_payment_number}`, f.payment_method)}
         ${user.is_club_member ? paymentOption("club_member", PAYMENT_METHODS.club_member, f.payment_method) : ""}
       </div>
-      ${configuredCheckbox("terms_accepted", f.terms_accepted, db.PaymentsSettings.cancellation_terms_text)}
+      ${configuredCheckbox("terms_accepted", f.terms_accepted, state.db.PaymentsSettings.cancellation_terms_text)}
       ${configuredCheckbox("save_details_for_next_time", f.save_details_for_next_time)}
       <div class="form-grid">
         ${configuredInput("account_password", f.account_password || "", "password")}
@@ -1003,10 +685,10 @@ function renderRegistrationStep(f, event) {
         <div class="actions">
           <button class="btn secondary" type="button" data-action="clear-signature">ניקוי חתימה</button>
         </div>
-        <div class="warning-list">${registrationState.signatureDataUrl ? `<div class="alert ok">חתימה נקלטה.</div>` : `<div class="alert danger">יש לחתום לפני שליחת ההרשמה.</div>`}</div>` : ""}
+        <div class="warning-list">${state.registrationState.signatureDataUrl ? `<div class="alert ok">חתימה נקלטה.</div>` : `<div class="alert danger">יש לחתום לפני שליחת ההרשמה.</div>`}</div>` : ""}
     `;
   }
-  if (registrationState.step === 1) {
+  if (state.registrationState.step === 1) {
     return `
       <h3>פרטים אישיים</h3>
       <div class="form-grid">
@@ -1019,7 +701,7 @@ function renderRegistrationStep(f, event) {
       </div>
     `;
   }
-  if (registrationState.step === 2) {
+  if (state.registrationState.step === 2) {
     return `
       <h3>פרטי צלילה וביטוח</h3>
       <div class="form-grid">
@@ -1031,26 +713,26 @@ function renderRegistrationStep(f, event) {
         ${selectField("air_type", "סוג אוויר", f.air_type, [["air", "אוויר"], ["nitrox", "נייטרוקס"]], true)}
       </div>
       <div class="form-grid">
-        ${fileField("certification_file", "העלאת תעודת צלילה", f.existingCertificationFileUrl, registrationState.newCertificationFile, true)}
-        ${fileField("insurance_file", "העלאת ביטוח", f.existingInsuranceFileUrl, registrationState.newInsuranceFile, true)}
+        ${fileField("certification_file", "העלאת תעודת צלילה", f.existingCertificationFileUrl, state.registrationState.newCertificationFile, true)}
+        ${fileField("insurance_file", "העלאת ביטוח", f.existingInsuranceFileUrl, state.registrationState.newInsuranceFile, true)}
       </div>
       <div class="form-grid">${dynamicFields.map((field) => dynamicField(field, f[field.field_key] || "")).join("")}</div>
     `;
   }
-  if (registrationState.step === 3) {
+  if (state.registrationState.step === 3) {
     const user = currentUser();
     return `
       <h3>תשלום ותנאים</h3>
-      <p>${escapeHtml(db.PaymentsSettings.payment_text)}</p>
+      <p>${escapeHtml(state.db.PaymentsSettings.payment_text)}</p>
       <div class="radio-stack">
-        ${paymentOption("bit", `${PAYMENT_METHODS.bit} (${db.PaymentsSettings.bit_link})`, f.payment_method)}
-        ${paymentOption("paybox", `${PAYMENT_METHODS.paybox} (${db.PaymentsSettings.paybox_link})`, f.payment_method)}
-        ${paymentOption("phone", `${PAYMENT_METHODS.phone} - ${db.PaymentsSettings.phone_payment_number}`, f.payment_method)}
+        ${paymentOption("bit", `${PAYMENT_METHODS.bit} (${state.db.PaymentsSettings.bit_link})`, f.payment_method)}
+        ${paymentOption("paybox", `${PAYMENT_METHODS.paybox} (${state.db.PaymentsSettings.paybox_link})`, f.payment_method)}
+        ${paymentOption("phone", `${PAYMENT_METHODS.phone} - ${state.db.PaymentsSettings.phone_payment_number}`, f.payment_method)}
         ${user.is_club_member ? paymentOption("club_member", PAYMENT_METHODS.club_member, f.payment_method) : ""}
       </div>
       <label class="checkbox-field">
         <input type="checkbox" name="terms_accepted" ${f.terms_accepted ? "checked" : ""} />
-        <span><span class="required">*</span> ${escapeHtml(db.PaymentsSettings.cancellation_terms_text)}</span>
+        <span><span class="required">*</span> ${escapeHtml(state.db.PaymentsSettings.cancellation_terms_text)}</span>
       </label>
       <label class="checkbox-field">
         <input type="checkbox" name="save_details_for_next_time" ${f.save_details_for_next_time ? "checked" : ""} />
@@ -1070,7 +752,7 @@ function renderRegistrationStep(f, event) {
     <div class="actions">
       <button class="btn secondary" type="button" data-action="clear-signature">ניקוי חתימה</button>
     </div>
-    <div class="warning-list">${registrationState.signatureDataUrl ? `<div class="alert ok">חתימה נקלטה.</div>` : `<div class="alert danger">יש לחתום לפני שליחת ההרשמה.</div>`}</div>
+    <div class="warning-list">${state.registrationState.signatureDataUrl ? `<div class="alert ok">חתימה נקלטה.</div>` : `<div class="alert danger">יש לחתום לפני שליחת ההרשמה.</div>`}</div>
   `;
 }
 
@@ -1136,7 +818,7 @@ function inputField(name, label, value, required, type = "text") {
 }
 
 function registrationField(key) {
-  return db.RegistrationFields?.find((field) => field.field_key === key) || DEFAULT_REGISTRATION_FIELDS.find((field) => field.field_key === key);
+  return state.db.RegistrationFields?.find((field) => field.field_key === key) || DEFAULT_REGISTRATION_FIELDS.find((field) => field.field_key === key);
 }
 
 function isRegistrationFieldActive(key) {
@@ -1177,13 +859,13 @@ function configuredCheckbox(key, checked, fallbackLabel = "") {
 }
 
 function renderConfiguredRegistrationFields(section, f) {
-  return (db.RegistrationFields || [])
+  return (state.db.RegistrationFields || [])
     .filter((field) => field.section === section && field.is_active)
     .sort((a, b) => a.order_index - b.order_index)
     .map((field) => {
       if (field.field_key === "nitrox_level" && f.nitrox_certified !== "yes") return "";
-      if (field.field_key === "certification_file") return configuredFile("certification_file", f.existingCertificationFileUrl, registrationState.newCertificationFile);
-      if (field.field_key === "insurance_file") return configuredFile("insurance_file", f.existingInsuranceFileUrl, registrationState.newInsuranceFile);
+      if (field.field_key === "certification_file") return configuredFile("certification_file", f.existingCertificationFileUrl, state.registrationState.newCertificationFile);
+      if (field.field_key === "insurance_file") return configuredFile("insurance_file", f.existingInsuranceFileUrl, state.registrationState.newInsuranceFile);
       if (field.type === "checkbox") return configuredCheckbox(field.field_key, Boolean(f[field.field_key]));
       if (field.type === "signature") return "";
       return configuredInput(field.field_key, f[field.field_key] || "", field.type);
@@ -1223,32 +905,32 @@ function bindRegistrationEvents() {
   document.querySelectorAll("[data-step]").forEach((button) => {
     button.addEventListener("click", () => {
       collectRegistrationForm();
-      registrationState.step = Number(button.dataset.step);
-      renderRegistration(registrationState.event_id);
+      state.registrationState.step = Number(button.dataset.step);
+      renderRegistration(state.registrationState.event_id);
     });
   });
   document.querySelector("[data-action='next-step']")?.addEventListener("click", () => {
     collectRegistrationForm();
-    const errors = validateStep(registrationState.step);
-    registrationState.warnings = buildWarnings();
+    const errors = validateStep(state.registrationState.step);
+    state.registrationState.warnings = buildWarnings();
     maybeShowInsuranceRenewalPopup();
     if (errors.length) return showToast(errors[0], "error");
-    registrationState.step += 1;
-    renderRegistration(registrationState.event_id);
+    state.registrationState.step += 1;
+    renderRegistration(state.registrationState.event_id);
   });
   document.querySelector("[data-action='prev-step']")?.addEventListener("click", () => {
     collectRegistrationForm();
-    registrationState.step -= 1;
-    renderRegistration(registrationState.event_id);
+    state.registrationState.step -= 1;
+    renderRegistration(state.registrationState.event_id);
   });
   document.querySelector("#registrationForm")?.addEventListener("change", (event) => {
-    if (event.target.name === "certification_file") registrationState.newCertificationFile = event.target.files[0] || null;
-    if (event.target.name === "insurance_file") registrationState.newInsuranceFile = event.target.files[0] || null;
+    if (event.target.name === "certification_file") state.registrationState.newCertificationFile = event.target.files[0] || null;
+    if (event.target.name === "insurance_file") state.registrationState.newInsuranceFile = event.target.files[0] || null;
     collectRegistrationForm();
     if (event.target.name === "insurance_valid_until") maybeShowInsuranceRenewalPopup();
     if (["nitrox_certified", "equipment_required", "equipment_items"].includes(event.target.name)) {
-      if (registrationState.form.nitrox_certified !== "yes") registrationState.form.nitrox_level = "none";
-      renderRegistration(registrationState.event_id);
+      if (state.registrationState.form.nitrox_certified !== "yes") state.registrationState.form.nitrox_level = "none";
+      renderRegistration(state.registrationState.event_id);
     }
   });
   document.querySelector("#registrationForm")?.addEventListener("submit", handleRegistrationSubmit);
@@ -1256,33 +938,33 @@ function bindRegistrationEvents() {
 
 function collectRegistrationForm() {
   const form = document.querySelector("#registrationForm");
-  if (!form || !registrationState) return;
+  if (!form || !state.registrationState) return;
   syncRegistrationFilesFromForm(form);
   const data = new FormData(form);
   for (const [key, value] of data.entries()) {
-    if (key !== "certification_file" && key !== "insurance_file") registrationState.form[key] = typeof value === "string" ? value.trim() : value;
+    if (key !== "certification_file" && key !== "insurance_file") state.registrationState.form[key] = typeof value === "string" ? value.trim() : value;
   }
-  registrationState.form.terms_accepted = data.get("terms_accepted") === "on";
-  registrationState.form.save_details_for_next_time = data.get("save_details_for_next_time") === "on";
-  registrationState.form.equipment_required = data.get("equipment_required") || registrationState.form.equipment_required || "no";
-  registrationState.form.equipment_items = registrationState.form.equipment_required === "yes" ? data.getAll("equipment_items") : [];
-  if (!registrationState.form.equipment_items.includes("fins")) registrationState.form.shoe_size = "";
-  if (registrationState.form.nitrox_certified !== "yes") registrationState.form.nitrox_level = "none";
+  state.registrationState.form.terms_accepted = data.get("terms_accepted") === "on";
+  state.registrationState.form.save_details_for_next_time = data.get("save_details_for_next_time") === "on";
+  state.registrationState.form.equipment_required = data.get("equipment_required") || state.registrationState.form.equipment_required || "no";
+  state.registrationState.form.equipment_items = state.registrationState.form.equipment_required === "yes" ? data.getAll("equipment_items") : [];
+  if (!state.registrationState.form.equipment_items.includes("fins")) state.registrationState.form.shoe_size = "";
+  if (state.registrationState.form.nitrox_certified !== "yes") state.registrationState.form.nitrox_level = "none";
 }
 
 function syncRegistrationFilesFromForm(form) {
   const certificationFile = form.querySelector('input[name="certification_file"]')?.files?.[0];
   const insuranceFile = form.querySelector('input[name="insurance_file"]')?.files?.[0];
-  if (certificationFile) registrationState.newCertificationFile = certificationFile;
-  if (insuranceFile) registrationState.newInsuranceFile = insuranceFile;
+  if (certificationFile) state.registrationState.newCertificationFile = certificationFile;
+  if (insuranceFile) state.registrationState.newInsuranceFile = insuranceFile;
 }
 
 function requiredActiveDynamicFields() {
-  return db.DynamicFormFields.filter((field) => field.form_name === "registration" && field.is_active && field.required);
+  return state.db.DynamicFormFields.filter((field) => field.form_name === "registration" && field.is_active && field.required);
 }
 
 function validateStep(step) {
-  const f = registrationState.form;
+  const f = state.registrationState.form;
   const errors = [];
   if (step === 1) {
     ["first_name", "last_name", "phone", "email", "id_number", "birth_date"].forEach((key) => {
@@ -1291,8 +973,8 @@ function validateStep(step) {
     ["diving_rank", "nitrox_certified", "nitrox_level", "insurance_valid_until", "last_dive_date", "air_type"].forEach((key) => {
       if (isRegistrationFieldRequired(key) && !f[key]) errors.push("יש להשלים את פרטי הצלילה והביטוח.");
     });
-    if (isRegistrationFieldRequired("certification_file") && !f.existingCertificationFileUrl && !registrationState.newCertificationFile) errors.push("יש להעלות תעודת צלילה או להשתמש בקובץ שמור.");
-    if (isRegistrationFieldRequired("insurance_file") && !f.existingInsuranceFileUrl && !registrationState.newInsuranceFile) errors.push("יש להעלות ביטוח או להשתמש בקובץ שמור.");
+    if (isRegistrationFieldRequired("certification_file") && !f.existingCertificationFileUrl && !state.registrationState.newCertificationFile) errors.push("יש להעלות תעודת צלילה או להשתמש בקובץ שמור.");
+    if (isRegistrationFieldRequired("insurance_file") && !f.existingInsuranceFileUrl && !state.registrationState.newInsuranceFile) errors.push("יש להעלות ביטוח או להשתמש בקובץ שמור.");
     if (f.equipment_required === "yes" && selectedEquipmentItems(f).includes("fins") && !f.shoe_size) errors.push("יש להזין מידת נעליים עבור השכרת סנפירים.");
     requiredActiveDynamicFields().forEach((field) => {
       const value = f[field.field_key];
@@ -1307,7 +989,7 @@ function validateStep(step) {
       if (!f.account_password || f.account_password.length < 6) errors.push("כדי לשמור פרטים יש לבחור סיסמה באורך 6 תווים לפחות.");
       if (f.account_password !== f.account_password_confirm) errors.push("אימות הסיסמה לא תואם לסיסמה שנבחרה.");
     }
-    if (isRegistrationFieldRequired("signature") && !registrationState.signatureDataUrl) errors.push("חתימה דיגיטלית היא חובה.");
+    if (isRegistrationFieldRequired("signature") && !state.registrationState.signatureDataUrl) errors.push("חתימה דיגיטלית היא חובה.");
     return [...new Set(errors)];
   }
   if (step === 1) {
@@ -1319,16 +1001,16 @@ function validateStep(step) {
     ["diving_rank", "nitrox_certified", "insurance_valid_until", "last_dive_date", "air_type"].forEach((key) => {
       if (!f[key]) errors.push("יש להשלים את פרטי הצלילה והביטוח.");
     });
-    if (!f.existingCertificationFileUrl && !registrationState.newCertificationFile) errors.push("יש להעלות תעודת צלילה או להשתמש בקובץ שמור.");
-    if (!f.existingInsuranceFileUrl && !registrationState.newInsuranceFile) errors.push("יש להעלות ביטוח או להשתמש בקובץ שמור.");
+    if (!f.existingCertificationFileUrl && !state.registrationState.newCertificationFile) errors.push("יש להעלות תעודת צלילה או להשתמש בקובץ שמור.");
+    if (!f.existingInsuranceFileUrl && !state.registrationState.newInsuranceFile) errors.push("יש להעלות ביטוח או להשתמש בקובץ שמור.");
   }
   if (step === 3 && !f.terms_accepted) errors.push("יש לאשר את תנאי הביטול.");
-  if (step === 4 && !registrationState.signatureDataUrl) errors.push("חתימה דיגיטלית היא חובה.");
+  if (step === 4 && !state.registrationState.signatureDataUrl) errors.push("חתימה דיגיטלית היא חובה.");
   return [...new Set(errors)];
 }
 
 function buildWarnings() {
-  const f = registrationState.form;
+  const f = state.registrationState.form;
   const warnings = [];
   const insuranceDate = new Date(`${f.insurance_valid_until}T00:00:00`);
   const lastDiveDate = new Date(`${f.last_dive_date}T00:00:00`);
@@ -1374,12 +1056,12 @@ function setupSignaturePad() {
     const p = position(event);
     ctx.lineTo(p.x, p.y);
     ctx.stroke();
-    registrationState.signatureDataUrl = canvas.toDataURL("image/png");
+    state.registrationState.signatureDataUrl = canvas.toDataURL("image/png");
     event.preventDefault();
   };
   const end = () => {
     drawing = false;
-    registrationState.signatureDataUrl = canvas.toDataURL("image/png");
+    state.registrationState.signatureDataUrl = canvas.toDataURL("image/png");
   };
   canvas.addEventListener("pointerdown", start);
   canvas.addEventListener("pointermove", move);
@@ -1390,25 +1072,25 @@ function setupSignaturePad() {
   canvas.addEventListener("touchend", end);
   document.querySelector("[data-action='clear-signature']")?.addEventListener("click", () => {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    registrationState.signatureDataUrl = "";
-    renderRegistration(registrationState.event_id);
+    state.registrationState.signatureDataUrl = "";
+    renderRegistration(state.registrationState.event_id);
   });
 }
 
 async function handleRegistrationSubmit(event) {
   event.preventDefault();
   collectRegistrationForm();
-  registrationState.warnings = buildWarnings();
+  state.registrationState.warnings = buildWarnings();
   maybeShowInsuranceRenewalPopup();
   const errors = validateStep(2);
   if (errors.length) {
     showToast(errors[0], "error");
-    renderRegistration(registrationState.event_id);
+    renderRegistration(state.registrationState.event_id);
     return;
   }
 
-  registrationState.loading = true;
-  renderRegistration(registrationState.event_id);
+  state.registrationState.loading = true;
+  renderRegistration(state.registrationState.event_id);
 
   try {
     console.log("התחלת שליחה");
@@ -1416,22 +1098,22 @@ async function handleRegistrationSubmit(event) {
     if (validateStep(1).length || validateStep(2).length) throw new Error("יש להשלים שדות חובה.");
 
     console.log("התחלת העלאת תעודה");
-    const certificationUrl = registrationState.newCertificationFile ? await readFileAsStoredUrl(registrationState.newCertificationFile) : registrationState.form.existingCertificationFileUrl;
+    const certificationUrl = state.registrationState.newCertificationFile ? await readFileAsStoredUrl(state.registrationState.newCertificationFile) : state.registrationState.form.existingCertificationFileUrl;
     console.log("סיום העלאת תעודה");
 
     console.log("התחלת העלאת ביטוח");
-    const insuranceUrl = registrationState.newInsuranceFile ? await readFileAsStoredUrl(registrationState.newInsuranceFile) : registrationState.form.existingInsuranceFileUrl;
+    const insuranceUrl = state.registrationState.newInsuranceFile ? await readFileAsStoredUrl(state.registrationState.newInsuranceFile) : state.registrationState.form.existingInsuranceFileUrl;
     console.log("סיום העלאת ביטוח");
 
     console.log("התחלת שמירת חתימה");
-    const signatureBlob = dataUrlToBlob(registrationState.signatureDataUrl);
+    const signatureBlob = dataUrlToBlob(state.registrationState.signatureDataUrl);
     if (!signatureBlob.size) throw new Error("שמירת החתימה נכשלה. נסו לחתום שוב.");
-    const signatureUrl = registrationState.signatureDataUrl;
+    const signatureUrl = state.registrationState.signatureDataUrl;
     console.log("סיום שמירת חתימה");
 
-    const eventData = eventById(registrationState.event_id);
+    const eventData = eventById(state.registrationState.event_id);
     const waitingList = seatCount(eventData.id) >= eventData.max_participants;
-    const f = registrationState.form;
+    const f = state.registrationState.form;
     const paymentStatus = f.payment_method === "club_member" ? "exempt_club_member" : "unpaid";
     const registeredUserId = f.save_details_for_next_time ? await ensureRegularUserFromRegistration(f) : guestRegistrationUserId(f);
     const selectedEquipment = f.equipment_required === "yes" ? selectedEquipmentItems(f) : [];
@@ -1468,12 +1150,12 @@ async function handleRegistrationSubmit(event) {
       payment_method: f.payment_method,
       payment_status: paymentStatus,
       club_approval_status: waitingList ? "waiting_list" : "pending",
-      admin_notes: registrationState.warnings.map((warning) => warning.text).join(" | "),
+      admin_notes: state.registrationState.warnings.map((warning) => warning.text).join(" | "),
       user_notes: f.user_notes || "",
-      is_club_member_registration: db.Users.find((user) => user.id === registeredUserId)?.is_club_member || false,
+      is_club_member_registration: state.db.Users.find((user) => user.id === registeredUserId)?.is_club_member || false,
       created_date: nowIso()
     };
-    db.DiveRegistrations.push(registration);
+    state.db.DiveRegistrations.push(registration);
 
     if (f.save_details_for_next_time) {
       console.log("עדכון פרופיל");
@@ -1482,31 +1164,31 @@ async function handleRegistrationSubmit(event) {
 
     saveDb();
     console.log("סיום הצלחה");
-    registrationState = null;
+    state.registrationState = null;
     navigate(`success/${registration.id}`);
   } catch (error) {
     showToast(error.message || "שגיאה בשליחת ההרשמה.", "error");
   } finally {
-    if (registrationState) registrationState.loading = false;
+    if (state.registrationState) state.registrationState.loading = false;
     render();
   }
 }
 
 function guestRegistrationUserId(f) {
-  const existing = db.Users.find((user) => user.id === currentUserId && (user.id_number === f.id_number || user.phone === f.phone));
+  const existing = state.db.Users.find((user) => user.id === state.currentUserId && (user.id_number === f.id_number || user.phone === f.phone));
   return existing?.id || "";
 }
 
 async function ensureRegularUserFromRegistration(f) {
-  const existing = db.Users.find((user) => user.id_number === f.id_number || user.phone === f.phone);
+  const existing = state.db.Users.find((user) => user.id_number === f.id_number || user.phone === f.phone);
   const passwordHash = f.account_password ? await hashPassword(f.account_password) : "";
   if (existing) {
     if (passwordHash) {
       existing.password_hash = passwordHash;
       existing.password_updated_date = nowIso();
     }
-    currentUserId = existing.id;
-    sessionStorage.setItem(SESSION_KEY, currentUserId);
+    state.currentUserId = existing.id;
+    sessionStorage.setItem(SESSION_KEY, state.currentUserId);
     return existing.id;
   }
 
@@ -1526,13 +1208,13 @@ async function ensureRegularUserFromRegistration(f) {
     password_updated_date: passwordHash ? nowIso() : "",
     created_date: nowIso()
   };
-  db.Users.push(newUser);
-  currentUserId = newUser.id;
-  sessionStorage.setItem(SESSION_KEY, currentUserId);
+  state.db.Users.push(newUser);
+  state.currentUserId = newUser.id;
+  sessionStorage.setItem(SESSION_KEY, state.currentUserId);
   return newUser.id;
 }
 
-function updateProfileFromRegistration(f, certificationUrl, insuranceUrl, userId = currentUserId) {
+function updateProfileFromRegistration(f, certificationUrl, insuranceUrl, userId = state.currentUserId) {
   const profile = getProfile(userId);
   const payload = {
     user_id: userId,
@@ -1553,8 +1235,8 @@ function updateProfileFromRegistration(f, certificationUrl, insuranceUrl, userId
     updated_date: nowIso()
   };
   if (profile) Object.assign(profile, payload);
-  else db.DiverProfiles.push({ id: id("profile"), ...payload });
-  Object.assign(db.Users.find((user) => user.id === userId), {
+  else state.db.DiverProfiles.push({ id: id("profile"), ...payload });
+  Object.assign(state.db.Users.find((user) => user.id === userId), {
     first_name: f.first_name,
     last_name: f.last_name,
     phone: f.phone,
@@ -1566,7 +1248,7 @@ function updateProfileFromRegistration(f, certificationUrl, insuranceUrl, userId
 }
 
 function renderSuccess(registrationId) {
-  const registration = db.DiveRegistrations.find((item) => item.id === registrationId);
+  const registration = state.db.DiveRegistrations.find((item) => item.id === registrationId);
   app.innerHTML = `
     <section class="success-screen">
       <div class="panel success-card">
@@ -1583,7 +1265,7 @@ function renderSuccess(registrationId) {
 }
 
 function renderMyDives() {
-  if (currentUserId === "guest") {
+  if (state.currentUserId === "guest") {
     app.innerHTML = `
       <section class="section">
         <div class="panel">
@@ -1596,7 +1278,7 @@ function renderMyDives() {
     `;
     return;
   }
-  const rows = db.DiveRegistrations.filter((reg) => reg.user_id === currentUserId);
+  const rows = state.db.DiveRegistrations.filter((reg) => reg.user_id === state.currentUserId);
   app.innerHTML = `
     <section class="section">
       <div class="section-header">
@@ -1631,7 +1313,7 @@ function renderMyDiveCard(registration) {
 }
 
 function renderProfile() {
-  if (currentUserId === "guest") {
+  if (state.currentUserId === "guest") {
     app.innerHTML = `
       <section class="section">
         <div class="panel">
@@ -1678,7 +1360,7 @@ function renderProfile() {
 }
 
 function renderSignup() {
-  if (currentUserId !== "guest") {
+  if (state.currentUserId !== "guest") {
     app.innerHTML = `
       <section class="section">
         <div class="panel">
@@ -1727,7 +1409,7 @@ function renderSignup() {
       showToast("יש למלא שם, טלפון וסיסמה באורך 6 תווים לפחות.", "error");
       return;
     }
-    if (db.Users.some((user) => (email && user.email?.toLowerCase() === email) || (phone && user.phone === phone) || (idNumber && user.id_number === idNumber))) {
+    if (state.db.Users.some((user) => (email && user.email?.toLowerCase() === email) || (phone && user.phone === phone) || (idNumber && user.id_number === idNumber))) {
       showToast("כבר קיים משתמש עם המייל, הטלפון או תעודת הזהות האלו.", "error");
       return;
     }
@@ -1748,9 +1430,9 @@ function renderSignup() {
       password_updated_date: nowIso(),
       created_date: nowIso()
     };
-    db.Users.push(newUser);
-    currentUserId = newUser.id;
-    sessionStorage.setItem(SESSION_KEY, currentUserId);
+    state.db.Users.push(newUser);
+    state.currentUserId = newUser.id;
+    sessionStorage.setItem(SESSION_KEY, state.currentUserId);
     saveDb();
     showToast("המשתמש נוצר בהצלחה.");
     navigate("profile");
@@ -1758,13 +1440,13 @@ function renderSignup() {
 }
 
 function renderLogin() {
-  if (loginState?.needsAdminCode) {
+  if (state.loginState?.needsAdminCode) {
     app.innerHTML = `
       <section class="section">
         <div class="panel">
           <p class="eyebrow">אימות מנהל</p>
           <h2>קוד אישור לאדמין</h2>
-          <p>נדרש קוד אישור נוסף למנהלי מועדון ואדמין. בשלב זה, עד שנחבר שליחת SMS/מייל אמיתית, הקוד מופיע כאן לבדיקה: <strong>${loginState.adminCode}</strong></p>
+          <p>נדרש קוד אישור נוסף למנהלי מועדון ואדמין. בשלב זה, עד שנחבר שליחת SMS/מייל אמיתית, הקוד מופיע כאן לבדיקה: <strong>${state.loginState.adminCode}</strong></p>
           <form id="adminCodeForm" class="form-grid">
             ${inputField("admin_code", "קוד אישור", "", true)}
             <div class="field">
@@ -1777,14 +1459,14 @@ function renderLogin() {
     document.querySelector("#adminCodeForm").addEventListener("submit", (event) => {
       event.preventDefault();
       const code = String(new FormData(event.currentTarget).get("admin_code") || "").trim();
-      if (code !== loginState.adminCode) {
+      if (code !== state.loginState.adminCode) {
         showToast("קוד האישור שגוי.", "error");
         return;
       }
-      currentUserId = loginState.userId;
-      sessionStorage.setItem(SESSION_KEY, currentUserId);
-      loginState = null;
-      registrationState = null;
+      state.currentUserId = state.loginState.userId;
+      sessionStorage.setItem(SESSION_KEY, state.currentUserId);
+      state.loginState = null;
+      state.registrationState = null;
       showToast("נכנסת כאדמין.");
       navigate("home");
     });
@@ -1814,7 +1496,7 @@ function renderLogin() {
     const identifier = String(data.get("identifier") || "").trim();
     const password = String(data.get("password") || "");
     const normalizedIdentifier = identifier.toLowerCase();
-    const user = db.Users.find((item) => item.phone === identifier || item.id_number === identifier || item.email?.toLowerCase() === normalizedIdentifier);
+    const user = state.db.Users.find((item) => item.phone === identifier || item.id_number === identifier || item.email?.toLowerCase() === normalizedIdentifier);
     if (!user) {
       showToast("לא נמצא משתמש עם האימייל, הטלפון או תעודת הזהות שהוזנו. בהרשמה הראשונה ייווצר משתמש רגיל.", "error");
       return;
@@ -1832,7 +1514,7 @@ function renderLogin() {
       return;
     }
     if (user.role === "admin" || user.role === "club_manager") {
-      loginState = {
+      state.loginState = {
         needsAdminCode: true,
         userId: user.id,
         adminCode: generateLoginCode()
@@ -1841,9 +1523,9 @@ function renderLogin() {
       renderLogin();
       return;
     }
-    currentUserId = user.id;
-    sessionStorage.setItem(SESSION_KEY, currentUserId);
-    registrationState = null;
+    state.currentUserId = user.id;
+    sessionStorage.setItem(SESSION_KEY, state.currentUserId);
+    state.registrationState = null;
     showToast(`נכנסת כ-${user.first_name} ${user.last_name}`);
     navigate("home");
   });
@@ -1875,16 +1557,16 @@ function renderClubAdmin() {
           <p>גלוי רק למשתמשים עם role מסוג admin או club_manager.</p>
         </div>
       </div>
-      ${cloudEnabled ? "" : `<div class="alert danger">האפליקציה אינה מחוברת כרגע ל-Firebase. הרשמות ממכשירים אחרים לא יופיעו כאן עד שחיבור הענן יפעל.</div>`}
+      ${state.cloudEnabled ? "" : `<div class="alert danger">האפליקציה אינה מחוברת כרגע ל-Firebase. הרשמות ממכשירים אחרים לא יופיעו כאן עד שחיבור הענן יפעל.</div>`}
       <div class="admin-layout">
-        <aside class="panel admin-menu">${tabs.map(([key, label]) => `<button class="btn ${currentAdminTab === key ? "primary" : "secondary"}" data-admin-tab="${key}" type="button">${label}</button>`).join("")}</aside>
+        <aside class="panel admin-menu">${tabs.map(([key, label]) => `<button class="btn ${state.currentAdminTab === key ? "primary" : "secondary"}" data-admin-tab="${key}" type="button">${label}</button>`).join("")}</aside>
         <div id="adminContent">${renderAdminContent()}</div>
       </div>
     </section>
   `;
   document.querySelectorAll("[data-admin-tab]").forEach((button) => {
     button.addEventListener("click", () => {
-      currentAdminTab = button.dataset.adminTab;
+      state.currentAdminTab = button.dataset.adminTab;
       renderClubAdmin();
     });
   });
@@ -1892,12 +1574,12 @@ function renderClubAdmin() {
 }
 
 function renderAdminContent() {
-  if (currentAdminTab === "sites") return renderAdminSites();
-  if (currentAdminTab === "events") return renderAdminEvents();
-  if (currentAdminTab === "users") return renderAdminUsers();
-  if (currentAdminTab === "brand") return renderAdminBrand();
-  if (currentAdminTab === "texts") return renderAdminTexts();
-  if (currentAdminTab === "payments") return renderAdminPayments();
+  if (state.currentAdminTab === "sites") return renderAdminSites();
+  if (state.currentAdminTab === "events") return renderAdminEvents();
+  if (state.currentAdminTab === "users") return renderAdminUsers();
+  if (state.currentAdminTab === "brand") return renderAdminBrand();
+  if (state.currentAdminTab === "texts") return renderAdminTexts();
+  if (state.currentAdminTab === "payments") return renderAdminPayments();
   return renderAdminRegistrations();
 }
 
@@ -1931,7 +1613,7 @@ function fileTypeLabel(field) {
 }
 
 function showFilePreview(registrationId, field, sourceElement) {
-  const reg = db.DiveRegistrations.find((item) => item.id === registrationId);
+  const reg = state.db.DiveRegistrations.find((item) => item.id === registrationId);
   const editedValue = sourceElement?.closest("[data-registration-row]")?.querySelector(`[data-reg-field="${field}"]`)?.value?.trim();
   const url = editedValue || reg?.[field] || "";
   if (!isPreviewableFileUrl(url)) {
@@ -1975,7 +1657,7 @@ function registrationEditCell(label, control) {
 function renderRegistrationAdminRow(reg) {
   const event = eventById(reg.event_id);
   const site = siteById(event?.site_id);
-  const isEditing = editingRegistrationId === reg.id;
+  const isEditing = state.editingRegistrationId === reg.id;
   const summaryRow = `<tr>
     <td>${escapeHtml(reg.first_name)} ${escapeHtml(reg.last_name)}</td>
     <td>${escapeHtml(reg.diving_rank || "-")}</td>
@@ -2036,10 +1718,10 @@ function renderRegistrationAdminRow(reg) {
 }
 
 function renderAdminRegistrations() {
-  const rows = db.DiveRegistrations.map(renderRegistrationAdminRow).join("");
+  const rows = state.db.DiveRegistrations.map(renderRegistrationAdminRow).join("");
   return `<div class="registrations-panel">
     <div class="registrations-toolbar">
-      <h3>הרשמות (${db.DiveRegistrations.length})</h3>
+      <h3>הרשמות (${state.db.DiveRegistrations.length})</h3>
       <select aria-label="סינון צלילות"><option>כל הצלילות</option></select>
     </div>
     <div class="table-wrap registrations-table-wrap">
@@ -2052,7 +1734,7 @@ function renderAdminRegistrations() {
 }
 
 function renderAdminSites() {
-  const editingSite = editingSiteId ? siteById(editingSiteId) : null;
+  const editingSite = state.editingSiteId ? siteById(state.editingSiteId) : null;
   const siteForm = {
     name: editingSite?.name || "",
     short_description: editingSite?.short_description || "",
@@ -2062,7 +1744,7 @@ function renderAdminSites() {
     suitable_for_ranks: editingSite?.suitable_for_ranks || "",
     image_url: editingSite?.image_url || "",
     price: editingSite?.price ?? "",
-    order_index: editingSite?.order_index ?? db.DiveSites.length + 1,
+    order_index: editingSite?.order_index ?? state.db.DiveSites.length + 1,
     is_active: editingSite?.is_active ?? true,
     show_on_homepage: editingSite?.show_on_homepage ?? true,
     allow_registration: editingSite?.allow_registration ?? true,
@@ -2093,7 +1775,7 @@ function renderAdminSites() {
         </div>
       </form>
     </div>
-    <div class="grid two section">${db.DiveSites
+    <div class="grid two section">${state.db.DiveSites
       .sort((a, b) => a.order_index - b.order_index)
       .map((site) => `<article class="card"><div class="card-body"><h3>${escapeHtml(site.name)}</h3><p>${escapeHtml(site.short_description)}</p><div class="meta-list"><div class="meta-item"><span>מחיר</span><strong>${site.price} ש"ח</strong></div><div class="meta-item"><span>סטטוס</span><strong>${site.is_active ? "פעיל" : "מוסתר"}</strong></div></div><div class="actions"><button class="btn primary" type="button" data-site-edit="${site.id}">עריכה</button><button class="btn secondary" type="button" data-site-toggle="${site.id}">${site.is_active ? "הסתר" : "הצג"}</button><button class="btn danger" type="button" data-site-delete="${site.id}">מחק</button></div></div></article>`)
       .join("")}</div>
@@ -2101,7 +1783,7 @@ function renderAdminSites() {
 }
 
 function renderAdminEvents() {
-  const editingEvent = editingEventId ? eventById(editingEventId) : null;
+  const editingEvent = state.editingEventId ? eventById(state.editingEventId) : null;
   const eventForm = {
     site_id: editingEvent?.site_id || "",
     dive_date: editingEvent?.dive_date || today(14),
@@ -2120,7 +1802,7 @@ function renderAdminEvents() {
       <h3>${editingEvent ? "עריכת צלילה פתוחה" : "ניהול צלילות פתוחות"}</h3>
       <form id="eventForm" class="form-grid">
         <input type="hidden" name="event_id" value="${escapeHtml(editingEvent?.id || "")}" />
-        ${selectField("site_id", "אתר", eventForm.site_id, db.DiveSites.map((site) => [site.id, site.name]), true)}
+        ${selectField("site_id", "אתר", eventForm.site_id, state.db.DiveSites.map((site) => [site.id, site.name]), true)}
         ${inputField("dive_date", "תאריך", eventForm.dive_date, true, "date")}
         ${inputField("dive_time", "שעת צלילה", eventForm.dive_time, true, "time")}
         ${inputField("meeting_time", "שעת מפגש", eventForm.meeting_time, true, "time")}
@@ -2136,7 +1818,7 @@ function renderAdminEvents() {
         </div>
       </form>
     </div>
-    <div class="grid two section">${db.DiveEvents.map(renderAdminEventCard).join("")}</div>
+    <div class="grid two section">${state.db.DiveEvents.map(renderAdminEventCard).join("")}</div>
   `;
 }
 
@@ -2202,7 +1884,7 @@ function renderUserRow(user) {
 }
 
 function renderAdminUsers() {
-  const editingUser = editingUserId ? db.Users.find((user) => user.id === editingUserId) : null;
+  const editingUser = state.editingUserId ? state.db.Users.find((user) => user.id === state.editingUserId) : null;
   const userForm = {
     first_name: editingUser?.first_name || "",
     last_name: editingUser?.last_name || "",
@@ -2234,24 +1916,24 @@ function renderAdminUsers() {
     <div class="table-wrap section">
       <table>
         <thead><tr><th>שם פרטי</th><th>שם משפחה</th><th>מייל</th><th>טלפון</th><th>role</th><th>חבר מועדון</th><th>סיסמה</th><th>פעולות</th></tr></thead>
-        <tbody>${db.Users.map(renderUserRow).join("")}</tbody>
+        <tbody>${state.db.Users.map(renderUserRow).join("")}</tbody>
       </table>
     </div>
   `;
 }
 
 function renderAdminBrand() {
-  const hasCustomLogo = Boolean(db.BrandSettings?.logo_data_url);
-  const previewLogo = hasCustomLogo ? db.BrandSettings.logo_data_url : DEFAULT_LOGO_URL;
+  const hasCustomLogo = Boolean(state.db.BrandSettings?.logo_data_url);
+  const previewLogo = hasCustomLogo ? state.db.BrandSettings.logo_data_url : DEFAULT_LOGO_URL;
   return `
     <div class="panel">
       <h3>לוגו המועדון</h3>
       <p>אפשר להעלות לוגו מתוך האפליקציה. ברירת המחדל היא לוגו אינדיגו שצירפת, וכל לוגו חדש נשמר מקומית בדפדפן ומופיע מיד בכותרת.</p>
       <div class="logo-preview">
-        <img src="${previewLogo}" alt="${escapeHtml(db.BrandSettings?.logo_alt || "INDIGO מועדון צלילה")}" />
+        <img src="${previewLogo}" alt="${escapeHtml(state.db.BrandSettings?.logo_alt || "INDIGO מועדון צלילה")}" />
       </div>
       <form id="brandForm" class="form-grid section">
-        ${inputField("logo_alt", "טקסט חלופי ללוגו", db.BrandSettings?.logo_alt || "INDIGO מועדון צלילה", true)}
+        ${inputField("logo_alt", "טקסט חלופי ללוגו", state.db.BrandSettings?.logo_alt || "INDIGO מועדון צלילה", true)}
         <label class="field"><span>קובץ לוגו</span><input name="logo_file" type="file" accept="image/*" /></label>
         <div class="actions">
           <button class="btn primary" type="submit">שמור לוגו</button>
@@ -2263,8 +1945,8 @@ function renderAdminBrand() {
 }
 
 function renderAdminTexts() {
-  textDrafts = Object.fromEntries(db.DynamicTexts.map((item) => [item.id, textDrafts[item.id] ?? item.text_value]));
-  fieldDrafts = Object.fromEntries(db.DynamicFormFields.map((item) => [item.id, fieldDrafts[item.id] ?? item.label]));
+  state.textDrafts = Object.fromEntries(state.db.DynamicTexts.map((item) => [item.id, state.textDrafts[item.id] ?? item.text_value]));
+  state.fieldDrafts = Object.fromEntries(state.db.DynamicFormFields.map((item) => [item.id, state.fieldDrafts[item.id] ?? item.label]));
   return `
     <div class="panel">
       <h3>ניהול שדות טופס הרשמה</h3>
@@ -2272,7 +1954,7 @@ function renderAdminTexts() {
       <div class="table-wrap">
         <table class="editable-table registration-fields-table">
           <thead><tr><th>מפתח</th><th>טקסט שדה</th><th>סוג</th><th>חובה</th><th>פעיל</th><th>סדר</th><th>אפשרויות</th></tr></thead>
-          <tbody>${db.RegistrationFields.map((field) => `<tr data-registration-field-row="${escapeHtml(field.field_key)}">
+          <tbody>${state.db.RegistrationFields.map((field) => `<tr data-registration-field-row="${escapeHtml(field.field_key)}">
             <td><strong>${escapeHtml(field.field_key)}</strong></td>
             <td><input data-registration-field-prop="label" value="${escapeHtml(field.label)}" /></td>
             <td>${escapeHtml(field.type)}</td>
@@ -2291,14 +1973,14 @@ function renderAdminTexts() {
     <div class="panel">
       <h3>ניהול טקסטים</h3>
       <p>הקלדה נשמרת ב-state מקומי בלבד. רק כפתור שמור מעדכן את הנתונים, לכן אין רינדור מחדש אחרי כל אות.</p>
-      ${db.DynamicTexts.map((item) => `<label class="field"><span>${escapeHtml(item.screen_name)} / ${escapeHtml(item.text_key)}</span><textarea data-text-draft="${item.id}" rows="3">${escapeHtml(textDrafts[item.id])}</textarea></label><button class="btn secondary" data-save-text="${item.id}">שמור טקסט</button>`).join("")}
+      ${state.db.DynamicTexts.map((item) => `<label class="field"><span>${escapeHtml(item.screen_name)} / ${escapeHtml(item.text_key)}</span><textarea data-text-draft="${item.id}" rows="3">${escapeHtml(state.textDrafts[item.id])}</textarea></label><button class="btn secondary" data-save-text="${item.id}">שמור טקסט</button>`).join("")}
     </div>
     <div class="panel section">
       <h3>ניהול שדות דינמיים</h3>
       <div class="table-wrap">
         <table class="editable-table registration-fields-table">
           <thead><tr><th>מפתח</th><th>טקסט</th><th>סוג</th><th>חובה</th><th>פעיל</th><th>סדר</th><th>אפשרויות</th><th>עזרה</th><th>פעולות</th></tr></thead>
-          <tbody>${db.DynamicFormFields.map((item) => `<tr data-dynamic-field-row="${item.id}">
+          <tbody>${state.db.DynamicFormFields.map((item) => `<tr data-dynamic-field-row="${item.id}">
             <td><input data-dynamic-field-prop="field_key" value="${escapeHtml(item.field_key)}" /></td>
             <td><input data-dynamic-field-prop="label" value="${escapeHtml(item.label)}" /></td>
             <td>${selectField("dynamic_type_preview", "", item.type, ["text", "select", "date", "file", "checkbox", "switch", "textarea"], false).replace("name=\"dynamic_type_preview\"", "data-dynamic-field-prop=\"type\"")}</td>
@@ -2324,7 +2006,7 @@ function renderAdminTexts() {
 }
 
 function renderAdminPayments() {
-  const p = db.PaymentsSettings;
+  const p = state.db.PaymentsSettings;
   return `<div class="panel"><h3>הגדרות תשלום</h3><form id="paymentForm" class="form-grid">${inputField("bit_link", "קישור ביט", p.bit_link, false)}${inputField("paybox_link", "קישור פייבוקס", p.paybox_link, false)}${inputField("phone_payment_number", "מספר טלפון לתשלום", p.phone_payment_number, false)}<label class="field"><span>טקסט תשלום</span><textarea name="payment_text" rows="3">${escapeHtml(p.payment_text)}</textarea></label><label class="field"><span>תנאי ביטול</span><textarea name="cancellation_terms_text" rows="3">${escapeHtml(p.cancellation_terms_text)}</textarea></label><button class="btn primary" type="submit">שמירת הגדרות</button></form></div>`;
 }
 
@@ -2348,14 +2030,14 @@ function bindAdminForms() {
     const waitlistPromoteButton = event.target.closest("[data-waitlist-promote]");
 
     if (editButton) {
-      editingSiteId = editButton.dataset.siteEdit;
+      state.editingSiteId = editButton.dataset.siteEdit;
       renderClubAdmin();
       showToast("נפתח טופס עריכת אתר.");
       window.setTimeout(() => document.querySelector("#siteEditor")?.scrollIntoView({ behavior: "smooth", block: "start" }), 0);
     }
 
     if (cancelEditButton) {
-      editingSiteId = null;
+      state.editingSiteId = null;
       renderClubAdmin();
     }
 
@@ -2367,30 +2049,30 @@ function bindAdminForms() {
     }
 
     if (deleteButton) {
-      db.DiveSites = db.DiveSites.filter((site) => site.id !== deleteButton.dataset.siteDelete);
-      if (editingSiteId === deleteButton.dataset.siteDelete) editingSiteId = null;
+      state.db.DiveSites = state.db.DiveSites.filter((site) => site.id !== deleteButton.dataset.siteDelete);
+      if (state.editingSiteId === deleteButton.dataset.siteDelete) state.editingSiteId = null;
       saveDb();
       renderClubAdmin();
     }
 
     if (eventEditButton) {
-      editingEventId = eventEditButton.dataset.eventEdit;
+      state.editingEventId = eventEditButton.dataset.eventEdit;
       renderClubAdmin();
       showToast("נפתח טופס עריכת צלילה.");
       window.setTimeout(() => document.querySelector("#eventForm")?.scrollIntoView({ behavior: "smooth", block: "start" }), 0);
     }
 
     if (eventCancelEditButton) {
-      editingEventId = null;
+      state.editingEventId = null;
       renderClubAdmin();
     }
 
     if (eventDeleteButton) {
       const eventId = eventDeleteButton.dataset.eventDelete;
-      const hasRegistrations = db.DiveRegistrations.some((registration) => registration.event_id === eventId);
+      const hasRegistrations = state.db.DiveRegistrations.some((registration) => registration.event_id === eventId);
       if (hasRegistrations && !window.confirm("יש הרשמות לצלילה הזו. למחוק את הצלילה בכל זאת? ההרשמות יישארו בטבלת ההרשמות.")) return;
-      db.DiveEvents = db.DiveEvents.filter((eventItem) => eventItem.id !== eventId);
-      if (editingEventId === eventId) editingEventId = null;
+      state.db.DiveEvents = state.db.DiveEvents.filter((eventItem) => eventItem.id !== eventId);
+      if (state.editingEventId === eventId) state.editingEventId = null;
       saveDb();
       showToast("הצלילה נמחקה.");
       renderClubAdmin();
@@ -2405,14 +2087,14 @@ function bindAdminForms() {
         showToast("רק אדמין יכול לערוך פרטי משתמשים והרשאות.", "error");
         return;
       }
-      editingUserId = userEditButton.dataset.userEdit;
+      state.editingUserId = userEditButton.dataset.userEdit;
       renderClubAdmin();
       showToast("נפתח טופס עריכת משתמש.");
       window.setTimeout(() => document.querySelector("#adminUserForm")?.scrollIntoView({ behavior: "smooth", block: "start" }), 0);
     }
 
     if (userCancelEditButton) {
-      editingUserId = null;
+      state.editingUserId = null;
       renderClubAdmin();
     }
 
@@ -2422,15 +2104,15 @@ function bindAdminForms() {
         return;
       }
       const userId = userDeleteButton.dataset.userDelete;
-      if (userId === currentUserId) {
+      if (userId === state.currentUserId) {
         showToast("אי אפשר למחוק את המשתמש המחובר כרגע.", "error");
         return;
       }
-      const hasRegistrations = db.DiveRegistrations.some((registration) => registration.user_id === userId);
+      const hasRegistrations = state.db.DiveRegistrations.some((registration) => registration.user_id === userId);
       if (hasRegistrations && !window.confirm("למשתמש הזה יש הרשמות קיימות. למחוק אותו בכל זאת? ההרשמות יישארו בטבלת ההרשמות.")) return;
-      db.Users = db.Users.filter((user) => user.id !== userId);
-      db.DiverProfiles = db.DiverProfiles.filter((profile) => profile.user_id !== userId);
-      if (editingUserId === userId) editingUserId = null;
+      state.db.Users = state.db.Users.filter((user) => user.id !== userId);
+      state.db.DiverProfiles = state.db.DiverProfiles.filter((profile) => profile.user_id !== userId);
+      if (state.editingUserId === userId) state.editingUserId = null;
       saveDb();
       showToast("המשתמש נמחק.");
       renderClubAdmin();
@@ -2443,13 +2125,13 @@ function bindAdminForms() {
       }
       const row = userSaveButton.closest("[data-user-row]");
       const userId = userSaveButton.dataset.userSave;
-      const user = db.Users.find((item) => item.id === userId);
+      const user = state.db.Users.find((item) => item.id === userId);
       const value = (field) => row.querySelector(`[data-user-field="${field}"]`);
       const email = value("email").value.trim().toLowerCase();
       const phone = value("phone").value.trim();
       const role = value("role").value;
       const password = value("password").value;
-      if (user.id === currentUserId && role !== "admin") {
+      if (user.id === state.currentUserId && role !== "admin") {
         showToast("אי אפשר להסיר לעצמך הרשאת אדמין מתוך המשתמש הנוכחי.", "error");
         renderClubAdmin();
         return;
@@ -2458,7 +2140,7 @@ function bindAdminForms() {
         showToast("סיסמה חדשה חייבת להיות באורך 6 תווים לפחות.", "error");
         return;
       }
-      if (db.Users.some((item) => item.id !== userId && (item.email?.toLowerCase() === email || (phone && item.phone === phone)))) {
+      if (state.db.Users.some((item) => item.id !== userId && (item.email?.toLowerCase() === email || (phone && item.phone === phone)))) {
         showToast("כבר קיים משתמש עם האימייל או הטלפון האלה.", "error");
         return;
       }
@@ -2482,7 +2164,7 @@ function bindAdminForms() {
     }
 
     if (registrationEditButton) {
-      editingRegistrationId = editingRegistrationId === registrationEditButton.dataset.registrationEdit ? null : registrationEditButton.dataset.registrationEdit;
+      state.editingRegistrationId = state.editingRegistrationId === registrationEditButton.dataset.registrationEdit ? null : registrationEditButton.dataset.registrationEdit;
       renderClubAdmin();
     }
 
@@ -2496,7 +2178,7 @@ function bindAdminForms() {
         return;
       }
       const row = registrationSaveButton.closest("[data-registration-row]");
-      const reg = db.DiveRegistrations.find((item) => item.id === registrationSaveButton.dataset.registrationSave);
+      const reg = state.db.DiveRegistrations.find((item) => item.id === registrationSaveButton.dataset.registrationSave);
       const value = (field) => row.querySelector(`[data-reg-field="${field}"]`);
       const selectedEquipment = [...row.querySelectorAll("[data-reg-equipment-item]:checked")].map((input) => input.value);
       Object.assign(reg, {
@@ -2530,7 +2212,7 @@ function bindAdminForms() {
         updated_date: nowIso()
       });
       saveDb();
-      editingRegistrationId = null;
+      state.editingRegistrationId = null;
       showToast("ההרשמה נשמרה.");
       renderClubAdmin();
     }
@@ -2541,8 +2223,8 @@ function bindAdminForms() {
         return;
       }
       if (!window.confirm("למחוק את ההרשמה הזו?")) return;
-      db.DiveRegistrations = db.DiveRegistrations.filter((item) => item.id !== registrationDeleteButton.dataset.registrationDelete);
-      if (editingRegistrationId === registrationDeleteButton.dataset.registrationDelete) editingRegistrationId = null;
+      state.db.DiveRegistrations = state.db.DiveRegistrations.filter((item) => item.id !== registrationDeleteButton.dataset.registrationDelete);
+      if (state.editingRegistrationId === registrationDeleteButton.dataset.registrationDelete) state.editingRegistrationId = null;
       saveDb();
       showToast("ההרשמה נמחקה.");
       renderClubAdmin();
@@ -2550,7 +2232,7 @@ function bindAdminForms() {
   });
   document.querySelectorAll("[data-reg-action]").forEach((button) => button.addEventListener("click", () => updateRegistration(button.dataset.id, button.dataset.regAction)));
   document.querySelectorAll("[data-reg-note]").forEach((textarea) => textarea.addEventListener("change", () => {
-    const reg = db.DiveRegistrations.find((item) => item.id === textarea.dataset.regNote);
+    const reg = state.db.DiveRegistrations.find((item) => item.id === textarea.dataset.regNote);
     reg.admin_notes = textarea.value;
     saveDb();
     showToast("הערה נשמרה.");
@@ -2575,10 +2257,10 @@ function bindAdminForms() {
     };
     if (data.site_id) {
       Object.assign(siteById(data.site_id), payload);
-      editingSiteId = null;
+      state.editingSiteId = null;
       showToast("האתר עודכן.");
     } else {
-      db.DiveSites.push({ id: id("site"), ...payload });
+      state.db.DiveSites.push({ id: id("site"), ...payload });
       showToast("אתר נוסף.");
     }
     saveDb();
@@ -2601,10 +2283,10 @@ function bindAdminForms() {
     };
     if (data.event_id) {
       Object.assign(eventById(data.event_id), payload, { updated_date: nowIso() });
-      editingEventId = null;
+      state.editingEventId = null;
       showToast("הצלילה עודכנה.");
     } else {
-      db.DiveEvents.push({ id: id("event"), ...payload, created_by: currentUserId });
+      state.db.DiveEvents.push({ id: id("event"), ...payload, created_by: state.currentUserId });
       showToast("צלילה פתוחה נוספה.");
     }
     saveDb();
@@ -2621,7 +2303,7 @@ function bindAdminForms() {
     const email = String(data.email || "").trim().toLowerCase();
     const phone = String(data.phone || "").trim();
     const password = String(data.password || "");
-    const existingUser = userId ? db.Users.find((user) => user.id === userId) : null;
+    const existingUser = userId ? state.db.Users.find((user) => user.id === userId) : null;
     if (!existingUser && password.length < 6) {
       showToast("סיסמה ראשונית חייבת להיות באורך 6 תווים לפחות.", "error");
       return;
@@ -2630,12 +2312,12 @@ function bindAdminForms() {
       showToast("סיסמה חדשה חייבת להיות באורך 6 תווים לפחות.", "error");
       return;
     }
-    if (db.Users.some((user) => user.id !== userId && (user.email?.toLowerCase() === email || (phone && user.phone === phone)))) {
+    if (state.db.Users.some((user) => user.id !== userId && (user.email?.toLowerCase() === email || (phone && user.phone === phone)))) {
       showToast("כבר קיים משתמש עם האימייל או הטלפון האלה.", "error");
       return;
     }
     if (existingUser) {
-      if (existingUser.id === currentUserId && data.role !== "admin") {
+      if (existingUser.id === state.currentUserId && data.role !== "admin") {
         showToast("אי אפשר להסיר לעצמך הרשאת אדמין מתוך המשתמש הנוכחי.", "error");
         return;
       }
@@ -2653,13 +2335,13 @@ function bindAdminForms() {
         existingUser.password_hash = await hashPassword(password);
         existingUser.password_updated_date = nowIso();
       }
-      editingUserId = null;
+      state.editingUserId = null;
       saveDb();
       showToast("פרטי המשתמש עודכנו.");
       renderClubAdmin();
       return;
     }
-    db.Users.push({
+    state.db.Users.push({
       id: id("user"),
       first_name: data.first_name,
       last_name: data.last_name,
@@ -2675,7 +2357,7 @@ function bindAdminForms() {
       password_updated_date: nowIso(),
       created_date: nowIso()
     });
-    editingUserId = null;
+    state.editingUserId = null;
     saveDb();
     showToast("המשתמש נוסף עם ההרשאה שנבחרה.");
     renderClubAdmin();
@@ -2686,8 +2368,8 @@ function bindAdminForms() {
       renderClubAdmin();
       return;
     }
-    const user = db.Users.find((item) => item.id === select.dataset.userRole);
-    if (user.id === currentUserId && select.value !== "admin") {
+    const user = state.db.Users.find((item) => item.id === select.dataset.userRole);
+    if (user.id === state.currentUserId && select.value !== "admin") {
       showToast("אי אפשר להסיר לעצמך הרשאת אדמין מתוך המשתמש הנוכחי.", "error");
       renderClubAdmin();
       return;
@@ -2701,7 +2383,7 @@ function bindAdminForms() {
       showToast("רק מנהל מועדון או אדמין יכולים לסמן חבר מועדון.", "error");
       return;
     }
-    const user = db.Users.find((item) => item.id === button.dataset.userMember);
+    const user = state.db.Users.find((item) => item.id === button.dataset.userMember);
     user.is_club_member = !user.is_club_member;
     user.club_member_notes = user.is_club_member ? "סומן על ידי מנהל מועדון" : "";
     saveDb();
@@ -2715,7 +2397,7 @@ function bindAdminForms() {
     if (file && file.size) {
       const reader = new FileReader();
       reader.onload = () => {
-        db.BrandSettings = {
+        state.db.BrandSettings = {
           logo_data_url: reader.result,
           logo_alt: logoAlt,
           updated_date: nowIso()
@@ -2727,15 +2409,15 @@ function bindAdminForms() {
       reader.onerror = () => showToast("שמירת הלוגו נכשלה. נסו קובץ אחר.", "error");
       reader.readAsDataURL(file);
     } else {
-      db.BrandSettings.logo_alt = logoAlt;
-      db.BrandSettings.updated_date = nowIso();
+      state.db.BrandSettings.logo_alt = logoAlt;
+      state.db.BrandSettings.updated_date = nowIso();
       saveDb();
       showToast("פרטי הלוגו נשמרו.");
       render();
     }
   });
   document.querySelector("[data-brand-reset]")?.addEventListener("click", () => {
-    db.BrandSettings = {
+    state.db.BrandSettings = {
       logo_data_url: "",
       logo_alt: "INDIGO מועדון צלילה",
       updated_date: nowIso()
@@ -2746,31 +2428,31 @@ function bindAdminForms() {
   });
   document.querySelector("#paymentForm")?.addEventListener("submit", (event) => {
     event.preventDefault();
-    Object.assign(db.PaymentsSettings, Object.fromEntries(new FormData(event.currentTarget).entries()), { updated_date: nowIso() });
+    Object.assign(state.db.PaymentsSettings, Object.fromEntries(new FormData(event.currentTarget).entries()), { updated_date: nowIso() });
     saveDb();
     showToast("הגדרות התשלום נשמרו.");
   });
   document.querySelectorAll("[data-text-draft]").forEach((textarea) => textarea.addEventListener("input", () => {
-    textDrafts[textarea.dataset.textDraft] = textarea.value;
+    state.textDrafts[textarea.dataset.textDraft] = textarea.value;
   }));
   document.querySelectorAll("[data-save-text]").forEach((button) => button.addEventListener("click", () => {
-    const item = db.DynamicTexts.find((text) => text.id === button.dataset.saveText);
-    item.text_value = textDrafts[item.id];
+    const item = state.db.DynamicTexts.find((text) => text.id === button.dataset.saveText);
+    item.text_value = state.textDrafts[item.id];
     saveDb();
     showToast("טקסט נשמר.");
   }));
   document.querySelectorAll("[data-field-draft]").forEach((input) => input.addEventListener("input", () => {
-    fieldDrafts[input.dataset.fieldDraft] = input.value;
+    state.fieldDrafts[input.dataset.fieldDraft] = input.value;
   }));
   document.querySelectorAll("[data-save-field]").forEach((button) => button.addEventListener("click", () => {
-    const item = db.DynamicFormFields.find((field) => field.id === button.dataset.saveField);
-    item.label = fieldDrafts[item.id];
+    const item = state.db.DynamicFormFields.find((field) => field.id === button.dataset.saveField);
+    item.label = state.fieldDrafts[item.id];
     saveDb();
     showToast("שדה נשמר.");
   }));
   document.querySelectorAll("[data-save-dynamic-field]").forEach((button) => button.addEventListener("click", () => {
     const row = button.closest("[data-dynamic-field-row]");
-    const item = db.DynamicFormFields.find((field) => field.id === button.dataset.saveDynamicField);
+    const item = state.db.DynamicFormFields.find((field) => field.id === button.dataset.saveDynamicField);
     const prop = (name) => row.querySelector(`[data-dynamic-field-prop="${name}"]`);
     Object.assign(item, {
       field_key: prop("field_key").value.trim(),
@@ -2782,14 +2464,14 @@ function bindAdminForms() {
       options: prop("options").value,
       help_text: prop("help_text").value
     });
-    db.DynamicFormFields.sort((a, b) => a.order_index - b.order_index);
+    state.db.DynamicFormFields.sort((a, b) => a.order_index - b.order_index);
     saveDb();
     showToast("השדה הדינמי נשמר.");
     renderClubAdmin();
   }));
   document.querySelectorAll("[data-delete-dynamic-field]").forEach((button) => button.addEventListener("click", () => {
     if (!window.confirm("למחוק את השדה הדינמי?")) return;
-    db.DynamicFormFields = db.DynamicFormFields.filter((field) => field.id !== button.dataset.deleteDynamicField);
+    state.db.DynamicFormFields = state.db.DynamicFormFields.filter((field) => field.id !== button.dataset.deleteDynamicField);
     saveDb();
     showToast("השדה הדינמי נמחק.");
     renderClubAdmin();
@@ -2797,7 +2479,7 @@ function bindAdminForms() {
   document.querySelector("[data-save-registration-fields]")?.addEventListener("click", () => {
     document.querySelectorAll("[data-registration-field-row]").forEach((row) => {
       const key = row.dataset.registrationFieldRow;
-      const field = db.RegistrationFields.find((item) => item.field_key === key);
+      const field = state.db.RegistrationFields.find((item) => item.field_key === key);
       if (!field) return;
       const prop = (name) => row.querySelector(`[data-registration-field-prop="${name}"]`);
       field.label = prop("label").value.trim() || field.label;
@@ -2806,14 +2488,14 @@ function bindAdminForms() {
       field.order_index = Number(prop("order_index").value) || field.order_index;
       field.options = prop("options").value;
     });
-    db.RegistrationFields.sort((a, b) => a.order_index - b.order_index);
+    state.db.RegistrationFields.sort((a, b) => a.order_index - b.order_index);
     saveDb();
     showToast("שדות ההרשמה נשמרו.");
     renderClubAdmin();
   });
   document.querySelector("[data-reset-registration-fields]")?.addEventListener("click", () => {
     if (!window.confirm("להחזיר את כל שדות ההרשמה לברירת המחדל?")) return;
-    db.RegistrationFields = normalizeRegistrationFields([]);
+    state.db.RegistrationFields = normalizeRegistrationFields([]);
     saveDb();
     showToast("שדות ההרשמה אופסו לברירת המחדל.");
     renderClubAdmin();
@@ -2821,7 +2503,7 @@ function bindAdminForms() {
   document.querySelector("#dynamicFieldForm")?.addEventListener("submit", (event) => {
     event.preventDefault();
     const data = Object.fromEntries(new FormData(event.currentTarget).entries());
-    db.DynamicFormFields.push({ id: id("field"), form_name: "registration", field_key: data.field_key, label: data.label, type: data.type, required: data.required === "on", options: data.options, is_active: true, order_index: db.DynamicFormFields.length + 1, help_text: "" });
+    state.db.DynamicFormFields.push({ id: id("field"), form_name: "registration", field_key: data.field_key, label: data.label, type: data.type, required: data.required === "on", options: data.options, is_active: true, order_index: state.db.DynamicFormFields.length + 1, help_text: "" });
     saveDb();
     renderClubAdmin();
   });
@@ -2849,7 +2531,7 @@ function openWhatsAppNotification(reg, action) {
 }
 
 function updateRegistration(registrationId, action) {
-  const reg = db.DiveRegistrations.find((item) => item.id === registrationId);
+  const reg = state.db.DiveRegistrations.find((item) => item.id === registrationId);
   if (!reg) return;
   if (action === "approve") reg.club_approval_status = "approved";
   if (action === "reject") reg.club_approval_status = "rejected";
@@ -2858,13 +2540,13 @@ function updateRegistration(registrationId, action) {
   if (action === "paybox") reg.payment_status = "paid_by_paybox";
   if (action === "phone") reg.payment_status = "paid_by_phone";
   if (action === "member") {
-    const user = db.Users.find((item) => item.id === reg.user_id);
+    const user = state.db.Users.find((item) => item.id === reg.user_id);
     user.is_club_member = true;
     reg.is_club_member_registration = true;
     reg.payment_method = "club_member";
     reg.payment_status = "exempt_club_member";
   }
-  if (action === "delete") db.DiveRegistrations = db.DiveRegistrations.filter((item) => item.id !== registrationId);
+  if (action === "delete") state.db.DiveRegistrations = state.db.DiveRegistrations.filter((item) => item.id !== registrationId);
   saveDb();
   showToast("ההרשמה עודכנה.");
   if (action === "approve" || action === "reject") openWhatsAppNotification(reg, action);
@@ -2906,10 +2588,10 @@ function runSelfCheck() {
   const userNav = ["home", "sites", "mydives", "profile"];
   const managerNav = ["home", "sites", "mydives", "profile", "club"];
   const checks = [
-    db.Users.every((user) => ["user", "club_manager", "admin"].includes(user.role)),
-    db.DiveSites.length >= 11,
-    db.PaymentsSettings.payment_text.includes("ההרשמה אינה מאושרת"),
-    db.DynamicFormFields.some((field) => field.field_key === "buddy_name"),
+    state.db.Users.every((user) => ["user", "club_manager", "admin"].includes(user.role)),
+    state.db.DiveSites.length >= 11,
+    state.db.PaymentsSettings.payment_text.includes("ההרשמה אינה מאושרת"),
+    state.db.DynamicFormFields.some((field) => field.field_key === "buddy_name"),
     !userNav.includes("club"),
     managerNav.includes("club")
   ];
@@ -2931,10 +2613,10 @@ document.querySelector("[data-action='toggle-menu']").addEventListener("click", 
 });
 
 window.addEventListener("hashchange", () => {
-  registrationState = null;
-  editingUserId = null;
-  editingEventId = null;
-  editingRegistrationId = null;
+  state.registrationState = null;
+  state.editingUserId = null;
+  state.editingEventId = null;
+  state.editingRegistrationId = null;
   render();
 });
 

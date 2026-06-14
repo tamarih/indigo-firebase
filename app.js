@@ -296,14 +296,14 @@ function renderHome() {
 
 function renderHomeDiveCard(event) {
   const site = siteById(event.site_id);
-  const state = eventRegistrationState(event);
+  const eventState = eventRegistrationState(event);
   const count = seatCount(event.id);
   const mediaStyle = site?.image_url ? `style="background-image: linear-gradient(180deg, rgba(5, 70, 83, 0.08), rgba(5, 70, 83, 0.62)), url('${escapeHtml(site.image_url)}')"` : "";
-  const statusText = state === "open" ? "סטטוס: פתוח להרשמה" : state === "full" ? "סטטוס: הצלילה מלאה" : "סטטוס: ההרשמה סגורה";
-  const statusClass = state === "open" ? "ok" : state === "full" ? "warn" : "danger";
-  const action = state === "open"
+  const statusText = eventState === "open" ? "סטטוס: פתוח להרשמה" : eventState === "full" ? "סטטוס: הצלילה מלאה" : "סטטוס: ההרשמה סגורה";
+  const statusClass = eventState === "open" ? "ok" : eventState === "full" ? "warn" : "danger";
+  const action = eventState === "open"
     ? `<a class="btn primary" href="#register/${event.id}">הרשמה</a>`
-    : state === "full"
+    : eventState === "full"
       ? `<a class="btn secondary" href="#waitlist/${event.id}">הצטרפות לרשימת המתנה</a>`
       : "";
 
@@ -441,13 +441,13 @@ function renderSiteDetails(siteId) {
 
 function renderEventCard(event) {
   const site = siteById(event.site_id);
-  const state = eventRegistrationState(event);
+  const eventState = eventRegistrationState(event);
   const count = seatCount(event.id);
-  const statusText = state === "open" ? "סטטוס: פתוח להרשמה" : state === "full" ? "סטטוס: הצלילה מלאה" : "סטטוס: ההרשמה סגורה";
-  const statusClass = state === "open" ? "ok" : state === "full" ? "warn" : "danger";
-  const action = state === "open"
+  const statusText = eventState === "open" ? "סטטוס: פתוח להרשמה" : eventState === "full" ? "סטטוס: הצלילה מלאה" : "סטטוס: ההרשמה סגורה";
+  const statusClass = eventState === "open" ? "ok" : eventState === "full" ? "warn" : "danger";
+  const action = eventState === "open"
     ? `<a class="btn primary" href="#register/${event.id}">הרשמה</a>`
-    : state === "full"
+    : eventState === "full"
       ? `<a class="btn secondary" href="#waitlist/${event.id}">הצטרפות לרשימת המתנה</a>`
       : "";
   return `
@@ -476,7 +476,7 @@ function renderWaitlist(eventId) {
   const event = eventById(eventId);
   const site = event ? siteById(event.site_id) : null;
   if (!event || !site) return renderNotFound();
-  const state = eventRegistrationState(event);
+  const eventState = eventRegistrationState(event);
 
   app.innerHTML = `
     <section class="section">
@@ -484,7 +484,7 @@ function renderWaitlist(eventId) {
         <p class="eyebrow">רשימת המתנה</p>
         <h2>${escapeHtml(site.name)}</h2>
         <p>הצלילה בתאריך ${formatDate(event.dive_date)} בשעה ${escapeHtml(event.dive_time || "")} מלאה כרגע. אפשר להצטרף לרשימת ההמתנה, והמועדון יצור קשר אם יתפנה מקום.</p>
-        ${state !== "full" ? `<div class="alert ok">כרגע יש מקום בצלילה הזו. אפשר להמשיך להרשמה מלאה.</div><div class="actions"><a class="btn primary" href="#register/${event.id}">מעבר להרשמה</a></div>` : `
+        ${eventState !== "full" ? `<div class="alert ok">כרגע יש מקום בצלילה הזו. אפשר להמשיך להרשמה מלאה.</div><div class="actions"><a class="btn primary" href="#register/${event.id}">מעבר להרשמה</a></div>` : `
           <form id="waitlistForm" class="form-grid">
             ${inputField("first_name", "שם פרטי", currentUser().id !== "guest" ? currentUser().first_name : "", true)}
             ${inputField("last_name", "שם משפחה", currentUser().id !== "guest" ? currentUser().last_name : "", true)}
@@ -562,9 +562,9 @@ function renderRegistration(eventId) {
   const event = eventById(eventId);
   const site = event ? siteById(event.site_id) : null;
   if (!event || !site) return renderNotFound();
-  const state = eventRegistrationState(event);
-  if (state === "full") return renderWaitlist(eventId);
-  if (state === "closed") {
+  const eventState = eventRegistrationState(event);
+  if (eventState === "full") return renderWaitlist(eventId);
+  if (eventState === "closed") {
     app.innerHTML = `
       <section class="section">
         <div class="panel">
